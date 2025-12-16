@@ -1,0 +1,735 @@
+function tb_input_init()
+{
+    global.tb_input =
+    {
+        key: array_create(256, false),
+        key_prev: array_create(256, false),
+
+        ar_key: -1,
+        ar_timer: 0,
+        ar_delay: 500,      // Aumentado de 400 para 500ms (delay inicial do Windows)
+        ar_rate: 31,
+
+        kb_prev_len: string_length(keyboard_string),
+        text_new: [],
+
+        mx: 0,
+        my: 0,
+        mouse_down: false,
+        mouse_pressed: false,
+        mouse_released: false,
+
+        click_timer: 0,
+        click_count: 0,
+
+        drag_active: false,
+        drag_start_x: 0,
+        drag_start_y: 0
+    };
+}
+
+function tb_input_step()
+{
+    var T = global.tb_input;
+
+    T.mx = mouse_x;
+    T.my = mouse_y;
+
+    T.mouse_pressed  = mouse_check_button_pressed(mb_left);
+    T.mouse_released = mouse_check_button_released(mb_left);
+    T.mouse_down     = mouse_check_button(mb_left);
+
+    if (T.mouse_pressed)
+    {
+        var now = current_time;
+
+        if (now - T.click_timer < 350)
+        {
+            T.click_count++;
+        }
+        else
+        {
+            T.click_count = 1;
+        }
+
+        T.click_timer = now;
+    }
+
+    for (var k = 0; k < 256; k++)
+    {
+        var now  = keyboard_check(k);
+        var prev = T.key[k];
+
+        if (now && !prev)
+        {
+            if (k != vk_shift && k != vk_control && k != vk_alt)
+            {
+                T.ar_key = k;
+                T.ar_timer = current_time + T.ar_delay;
+            }
+        }
+
+        if (!now && prev)
+        {
+            if (T.ar_key == k)
+            {
+                T.ar_key = -1;
+            }
+        }
+
+        T.key_prev[k] = T.key[k];
+        T.key[k]      = now;
+    }
+
+    if (T.ar_key != -1)
+    {
+        if (keyboard_check(T.ar_key))
+        {
+            if (current_time >= T.ar_timer)
+            {
+                T.ar_timer = current_time + (1000 / T.ar_rate);
+
+                T.key_prev[T.ar_key] = false;  // Mudado de true para false
+                T.key[T.ar_key]      = true;
+            }
+        }
+    }
+
+    var ks  = keyboard_string;
+    var len = string_length(ks);
+
+    T.text_new = [];
+
+    if (len > T.kb_prev_len)
+    {
+        var idx = 0;
+
+        for (var i = T.kb_prev_len + 1; i <= len; i++)
+        {
+            T.text_new[idx++] = string_char_at(ks, i);
+        }
+    }
+
+    T.kb_prev_len = len;
+}
+
+function tb_textfield_create(_x, _y, _w, _h)
+{
+    return {
+        text: "",
+        caret: 0,
+        select_start: 0,
+        select_end: 0,
+        scroll_x: 0,
+
+        pos_x: _x,
+        pos_y: _y,
+        width: _w,
+        height: _h,
+
+        padding: 5,
+
+        has_focus: false,
+
+        blink_timer: 0,
+        blink_visible: true,
+
+        drag_active: false,
+        drag_anchor: 0
+    };
+}
+
+function tb_textfield_draw(tf, font, col, recvis)
+{
+    if (font != -1)
+    {
+        draw_set_font(font);
+    }
+
+    var old = gpu_get_scissor();
+    gpu_set_scissor(tf.pos_x, tf.pos_y, tf.width, tf.height);
+	
+	if (recvis)
+	{
+		draw_set_colour(global.theme[global.theme_id,1]);
+		draw_rectangle(tf.pos_x, tf.pos_y, tf.pos_x + tf.width, tf.pos_y + tf.height, false)
+	}
+	
+    if (tf.select_start != tf.select_end)
+    {
+        var a = tf.select_start;
+        var b = tf.select_end;
+        if (a > b) { var t = a; a = b; b = t; }
+
+        var px1 = string_width(string_copy(tf.text, 1, a));
+        var px2 = string_width(string_copy(tf.text, 1, b));
+
+        draw_set_color(make_color_rgb(0,120,215));
+        draw_rectangle(tf.pos_x + tf.padding + px1 - tf.scroll_x,
+                       tf.pos_y + 4,
+                       tf.pos_x + tf.padding + px2 - tf.scroll_x,
+                       tf.pos_y + tf.height - 4,
+                       false);
+    }
+	
+	//Desenhar o texto
+    draw_set_color(col);
+	draw_set_valign(fa_middle);
+    draw_text(tf.pos_x + tf.padding - tf.scroll_x,
+              tf.pos_y + tf.height/2,
+              tf.text);
+	draw_set_valign(fa_top);
+	
+	
+    if (tf.has_focus && tf.blink_visible)
+    {
+        var cx = string_width(string_copy(tf.text, 1, tf.caret));
+        cx = tf.pos_x + tf.padding + cx - tf.scroll_x;
+
+        draw_line(cx, tf.pos_y + 4, cx, tf.pos_y + tf.height - 4);
+    }
+	
+    gpu_set_scissor(old);
+}
+
+function tb_textfield_process(tf)
+{
+    var T = global.tb_input;
+
+    // --------------------------------------------------------------------
+    // Foco e clique
+    // --------------------------------------------------------------------
+    if (T.mouse_pressed)
+    {
+        var inside = point_in_rectangle(
+            T.mx, T.my,
+            tf.pos_x, tf.pos_y,
+            tf.pos_x + tf.width,
+            tf.pos_y + tf.height
+        );
+
+        tf.has_focus = inside;
+
+        if (inside)
+        {
+            var local_x = (T.mx - tf.pos_x) + tf.scroll_x - tf.padding;
+            if (local_x < 0) local_x = 0;
+
+            tf.caret = string_mouse_position(tf.text, local_x);
+
+            tf.select_start = tf.caret;
+            tf.select_end   = tf.caret;
+
+            // --------------------------------------------------------
+            // Duplo clique → palavra
+            // --------------------------------------------------------
+            if (T.click_count == 2)
+            {
+                var p = tf.caret;
+
+                var a = p;
+                while (a > 0 && string_char_at(tf.text, a) != " ")
+                {
+                    a--;
+                }
+
+                var b = p;
+                while (b < string_length(tf.text) &&
+                       string_char_at(tf.text, b + 1) != " ")
+                {
+                    b++;
+                }
+
+                tf.select_start = a;
+                tf.select_end   = b;
+            }
+
+            // --------------------------------------------------------
+            // Triplo clique → texto inteiro
+            // --------------------------------------------------------
+            if (T.click_count >= 3)
+            {
+                tf.select_start = 0;
+                tf.select_end   = string_length(tf.text);
+            }
+
+            tf.drag_active = true;
+            tf.drag_anchor = tf.caret;
+            
+            // Reset do blink quando clicar
+            tf.blink_timer = 0;
+            tf.blink_visible = true;
+        }
+        else
+        {
+            tf.drag_active = false;
+        }
+    }
+
+    // Drag-select contínuo
+    if (tf.has_focus && tf.drag_active && T.mouse_down)
+    {
+        var lx = (T.mx - tf.pos_x) + tf.scroll_x - tf.padding;
+        if (lx < 0) lx = 0;
+
+        var p2 = string_mouse_position(tf.text, lx);
+
+        tf.caret = p2;
+        tf.select_start = tf.drag_anchor;
+        tf.select_end   = tf.caret;
+
+        // Scroll enquanto arrasta para fora (Chrome-like)
+        if (T.my < tf.pos_y)
+        {
+            tf.scroll_x -= 4;
+            if (tf.scroll_x < 0) tf.scroll_x = 0;
+        }
+        else if (T.my > tf.pos_y + tf.height)
+        {
+            tf.scroll_x += 4;
+        }
+    }
+
+    if (T.mouse_released)
+    {
+        tf.drag_active = false;
+    }
+
+    // --------------------------------------------------------------------
+    // Sem foco? sair.
+    // --------------------------------------------------------------------
+    if (!tf.has_focus)
+    {
+        return;
+    }
+
+    // --------------------------------------------------------------------
+    // INSERÇÃO DE TEXTO (UNICODE) - CORRIGIDO
+    // --------------------------------------------------------------------
+    var newchars = T.text_new;
+
+    if (array_length(newchars) > 0)
+    {
+        var a = tf.select_start;
+        var b = tf.select_end;
+        if (a > b) { var t = a; a = b; b = t; }
+
+        if (a != b)
+        {
+            tf.text = string_delete(tf.text, a + 1, b - a);
+            tf.caret = a;
+            tf.select_start = a;
+            tf.select_end   = a;
+        }
+
+        for (var i = 0; i < array_length(newchars); i++)
+        {
+            tf.text = string_insert(newchars[i], tf.text, tf.caret + 1);  // +1 CORRIGIDO
+            tf.caret++;
+        }
+        
+        tf.select_start = tf.caret;
+        tf.select_end   = tf.caret;
+        
+        // Reset do blink ao digitar
+        tf.blink_timer = 0;
+        tf.blink_visible = true;
+    }
+
+    // --------------------------------------------------------------------
+    // TECLAS ESPECIAIS
+    // --------------------------------------------------------------------
+    var key = T.key;
+    var key_prev = T.key_prev;
+    
+    // Detectar se a tecla foi pressionada NESTE frame
+    var key_pressed = array_create(256, false);
+    for (var k = 0; k < 256; k++)
+    {
+        key_pressed[k] = key[k] && !key_prev[k];
+    }
+
+    // BACKSPACE (com Ctrl → apagar palavra)
+    if (key_pressed[vk_backspace])
+    {
+        var a = tf.select_start;
+        var b = tf.select_end;
+        if (a > b) { var t = a; a = b; b = t; }
+
+        if (a != b)
+        {
+            tf.text = string_delete(tf.text, a + 1, b - a);
+            tf.caret = a;
+            tf.select_start = a;
+            tf.select_end   = a;
+        }
+        else if (tf.caret > 0)
+        {
+            if (key[vk_control])
+            {
+                var p = tf.caret;
+
+                while (p > 0 && string_char_at(tf.text, p) == " ")
+                {
+                    p--;
+                }
+                while (p > 0 && string_char_at(tf.text, p) != " ")
+                {
+                    p--;
+                }
+
+                var len = tf.caret - p;
+                tf.text = string_delete(tf.text, p + 1, len);
+                tf.caret = p;
+            }
+            else
+            {
+                tf.text = string_delete(tf.text, tf.caret, 1);
+                tf.caret--;
+            }
+        }
+        
+        tf.select_start = tf.caret;
+        tf.select_end   = tf.caret;
+        
+        // Reset do blink
+        tf.blink_timer = 0;
+        tf.blink_visible = true;
+    }
+
+    // DELETE (com Ctrl → apagar palavra direita)
+    if (key_pressed[vk_delete])
+    {
+        var a = tf.select_start;
+        var b = tf.select_end;
+        if (a > b) { var t = a; a = b; b = t; }
+
+        if (a != b)
+        {
+            tf.text = string_delete(tf.text, a + 1, b - a);
+            tf.caret = a;
+            tf.select_start = a;
+            tf.select_end   = a;
+        }
+        else if (tf.caret < string_length(tf.text))
+        {
+            if (key[vk_control])
+            {
+                var p = tf.caret + 1;
+
+                while (p <= string_length(tf.text) && string_char_at(tf.text, p) == " ")
+                {
+                    p++;
+                }
+                while (p <= string_length(tf.text) && string_char_at(tf.text, p) != " ")
+                {
+                    p++;
+                }
+
+                var len = p - (tf.caret + 1);
+                tf.text = string_delete(tf.text, tf.caret + 1, len);
+            }
+            else
+            {
+                tf.text = string_delete(tf.text, tf.caret + 1, 1);
+            }
+        }
+        
+        // Reset do blink
+        tf.blink_timer = 0;
+        tf.blink_visible = true;
+    }
+
+    // SETAS / SHIFT / CTRL
+    if (key_pressed[vk_left])
+    {
+        if (key[vk_shift])
+        {
+            // Shift pressionado: expandir seleção
+            if (tf.caret > 0)
+            {
+                if (key[vk_control])
+                {
+                    var p = tf.caret;
+                    while (p > 0 && string_char_at(tf.text, p) == " ")
+                    {
+                        p--;
+                    }
+                    while (p > 0 && string_char_at(tf.text, p) != " ")
+                    {
+                        p--;
+                    }
+                    tf.caret = p;
+                }
+                else
+                {
+                    tf.caret--;
+                }
+                tf.select_end = tf.caret;
+            }
+        }
+        else
+        {
+            // Shift não pressionado
+            if (tf.select_start != tf.select_end)
+            {
+                // Se há seleção, apenas move o caret para o início da seleção
+                var a = tf.select_start;
+                var b = tf.select_end;
+                tf.caret = (a < b) ? a : b;
+            }
+            else
+            {
+                // Sem seleção, move o caret normalmente
+                if (tf.caret > 0)
+                {
+                    if (key[vk_control])
+                    {
+                        var p = tf.caret;
+                        while (p > 0 && string_char_at(tf.text, p) == " ")
+                        {
+                            p--;
+                        }
+                        while (p > 0 && string_char_at(tf.text, p) != " ")
+                        {
+                            p--;
+                        }
+                        tf.caret = p;
+                    }
+                    else
+                    {
+                        tf.caret--;
+                    }
+                }
+            }
+            tf.select_start = tf.caret;
+            tf.select_end = tf.caret;
+        }
+        
+        // Reset do blink
+        tf.blink_timer = 0;
+        tf.blink_visible = true;
+    }
+
+    if (key_pressed[vk_right])
+    {
+        if (key[vk_shift])
+        {
+            // Shift pressionado: expandir seleção
+            if (tf.caret < string_length(tf.text))
+            {
+                if (key[vk_control])
+                {
+                    var p = tf.caret + 1;
+                    while (p <= string_length(tf.text) && string_char_at(tf.text, p) == " ")
+                    {
+                        p++;
+                    }
+                    while (p <= string_length(tf.text) && string_char_at(tf.text, p) != " ")
+                    {
+                        p++;
+                    }
+                    tf.caret = p - 1;
+                }
+                else
+                {
+                    tf.caret++;
+                }
+                tf.select_end = tf.caret;
+            }
+        }
+        else
+        {
+            // Shift não pressionado
+            if (tf.select_start != tf.select_end)
+            {
+                // Se há seleção, apenas move o caret para o fim da seleção
+                var a = tf.select_start;
+                var b = tf.select_end;
+                tf.caret = (a > b) ? a : b;
+            }
+            else
+            {
+                // Sem seleção, move o caret normalmente
+                if (tf.caret < string_length(tf.text))
+                {
+                    if (key[vk_control])
+                    {
+                        var p = tf.caret + 1;
+                        while (p <= string_length(tf.text) && string_char_at(tf.text, p) == " ")
+                        {
+                            p++;
+                        }
+                        while (p <= string_length(tf.text) && string_char_at(tf.text, p) != " ")
+                        {
+                            p++;
+                        }
+                        tf.caret = p - 1;
+                    }
+                    else
+                    {
+                        tf.caret++;
+                    }
+                }
+            }
+            tf.select_start = tf.caret;
+            tf.select_end = tf.caret;
+        }
+        
+        // Reset do blink
+        tf.blink_timer = 0;
+        tf.blink_visible = true;
+    }
+
+    // HOME / END
+    if (key_pressed[vk_home])
+    {
+        tf.caret = 0;
+
+        if (key[vk_shift]) tf.select_end = tf.caret;
+        else tf.select_start = tf.select_end = tf.caret;
+        
+        // Reset do blink
+        tf.blink_timer = 0;
+        tf.blink_visible = true;
+    }
+
+    if (key_pressed[vk_end])
+    {
+        var len_text = string_length(tf.text);
+        tf.caret = len_text;
+
+        if (key[vk_shift]) tf.select_end = tf.caret;
+        else tf.select_start = tf.select_end = tf.caret;
+        
+        // Reset do blink
+        tf.blink_timer = 0;
+        tf.blink_visible = true;
+    }
+
+    // CTRL+A
+    if (key_pressed[ord("A")] && key[vk_control])
+    {
+        tf.select_start = 0;
+        tf.select_end   = string_length(tf.text);
+        tf.caret        = tf.select_end;
+    }
+
+    // CTRL+C
+    if (key_pressed[ord("C")] && key[vk_control])
+    {
+        var a = tf.select_start;
+        var b = tf.select_end;
+        if (a > b) { var t = a; a = b; b = t; }
+
+        if (a != b)
+        {
+            clipboard_set_text(string_copy(tf.text, a + 1, b - a));
+        }
+    }
+
+    // CTRL+X (recortar)
+    if (key_pressed[ord("X")] && key[vk_control])
+    {
+        var a = tf.select_start;
+        var b = tf.select_end;
+        if (a > b) { var t = a; a = b; b = t; }
+
+        if (a != b)
+        {
+            clipboard_set_text(string_copy(tf.text, a + 1, b - a));
+            tf.text = string_delete(tf.text, a + 1, b - a);
+            tf.caret = a;
+            tf.select_start = a;
+            tf.select_end   = a;
+            
+            // Reset do blink
+            tf.blink_timer = 0;
+            tf.blink_visible = true;
+        }
+    }
+
+    // CTRL+V
+    if (key_pressed[ord("V")] && key[vk_control])
+    {
+        var clip = clipboard_get_text();
+
+        if (is_string(clip) && clip != "")
+        {
+            var a = tf.select_start;
+            var b = tf.select_end;
+            if (a > b) { var t = a; a = b; b = t; }
+
+            if (a != b)
+            {
+                tf.text = string_delete(tf.text, a + 1, b - a);
+                tf.caret = a;
+            }
+
+            tf.text = string_insert(clip, tf.text, tf.caret + 1);  // +1 CORRIGIDO
+            tf.caret += string_length(clip);
+
+            tf.select_start = tf.caret;
+            tf.select_end   = tf.caret;
+            
+            // Reset do blink
+            tf.blink_timer = 0;
+            tf.blink_visible = true;
+        }
+    }
+
+    // ENTER (aceito)
+    if (key_pressed[vk_enter])
+    {
+        // open_url(tf.text);
+    }
+
+    // --------------------------------------------------------------------
+    // SCROLL estilo Chrome
+    // --------------------------------------------------------------------
+    var caret_px = string_width(string_copy(tf.text, 1, tf.caret));
+    var total_px = string_width(tf.text);
+    var visible_txt = tf.width - tf.padding * 2;
+
+    if (total_px <= visible_txt)
+    {
+        tf.scroll_x = 0;
+    }
+    else
+    {
+        var margin = 5;  // margem de segurança para o caret não encostar na borda
+        
+        // Se o caret passou da borda direita
+        if (caret_px - tf.scroll_x > visible_txt - margin)
+        {
+            tf.scroll_x = caret_px - visible_txt + margin;
+        }
+
+        // Se o caret passou da borda esquerda
+        if (caret_px - tf.scroll_x < margin)
+        {
+            tf.scroll_x = caret_px - margin;
+        }
+
+        // Limitar o scroll
+        if (tf.scroll_x < 0)
+        {
+            tf.scroll_x = 0;
+        }
+        
+        var max_scroll = total_px - visible_txt;
+        if (tf.scroll_x > max_scroll)
+        {
+            tf.scroll_x = max_scroll;
+        }
+    }
+
+    // Blink
+    tf.blink_timer++;
+
+    if (tf.blink_timer >= global.framerate * 0.53)  // ~530ms como no Windows
+    {
+        tf.blink_timer = 0;
+        tf.blink_visible = !tf.blink_visible;
+    }
+}
